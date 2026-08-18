@@ -1,0 +1,8 @@
+playwright==1.61.0
+python-dotenv==1.2.2
+openpyxl==3.1.5
+pandas==3.0.3
+python-calamine==0.8.2
+lxml==6.1.1
+customtkinter==6.0.0
+pillow==12.3.0

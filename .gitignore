@@ -1,0 +1,7 @@
+.env
+venv/
+__pycache__/
+*.pyc
+exports/
+erro_timeout.png
+erro_geral.png
