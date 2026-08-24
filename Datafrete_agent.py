@@ -710,7 +710,7 @@ def _montar_aba_resumo(wb, ws, cfg, titulo, dados, tot_a, tot_b, col_a_header="U
         cor_fundo=AZUL_FOTUS,
         subtitulo=f"RELATÓRIO MATUTINO  —  {datetime.now().strftime('%d/%m/%Y')}",
         logo_esq="logo_fotus_excel.png",
-        logo_dir="logo_datafrete_excel.png",
+        logo_dir="Logo_datafrete_App.png",
         linha_unidade=unidade,
     )
 
@@ -1006,9 +1006,10 @@ class DatafreteApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("FOTUS — Agente de Automação Datafrete")
-        self.geometry("750x700")
+        self.title("Agente de Automação Datafrete")
+        self.geometry("750x760")
         ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("dark-blue")
         
         # Conecta a função de log global com a nossa UI
         global UI_LOG_CALLBACK
@@ -1017,12 +1018,50 @@ class DatafreteApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1) # Faz o log expandir
 
-        # ── Título ──
-        self.label_titulo = ctk.CTkLabel(self, text="Agente de Relatórios Datafrete", font=ctk.CTkFont(size=26, weight="bold"))
-        self.label_titulo.grid(row=0, column=0, padx=20, pady=(25, 15))
+        from PIL import Image
+        pasta = Path(__file__).parent
+
+        def get_scaled_size(image_path, target_height):
+            try:
+                img = Image.open(image_path)
+                w, h = img.size
+                return (int(w * (target_height / h)), target_height)
+            except Exception:
+                return (target_height, target_height)
+
+        # ── Cabeçalho (Logos + Título) ──
+        self.frame_header = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_header.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 10))
+        self.frame_header.grid_columnconfigure(0, weight=1)
+        self.frame_header.grid_columnconfigure(1, weight=1)
+        self.frame_header.grid_columnconfigure(2, weight=1)
+
+        try:
+            path_fotus = pasta / "logo_fotus_excel.png"
+            img_fotus = ctk.CTkImage(light_image=Image.open(path_fotus), dark_image=Image.open(path_fotus), size=get_scaled_size(path_fotus, 50))
+            self.lbl_logo_fotus = ctk.CTkLabel(self.frame_header, text="", image=img_fotus)
+            self.lbl_logo_fotus.grid(row=0, column=0, sticky="w")
+        except Exception as e:
+            log(f"Erro ao carregar logo Fotus na UI: {e}")
+
+        self.label_titulo = ctk.CTkLabel(
+            self.frame_header, 
+            text="Agente de Relatórios Datafrete", 
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=("#1B4F8A", "#65a5f0")  # Azul Fotus claro/escuro
+        )
+        self.label_titulo.grid(row=0, column=1)
+
+        try:
+            path_datafrete = pasta / "Logo_datafrete_App.png"
+            img_datafrete = ctk.CTkImage(light_image=Image.open(path_datafrete), dark_image=Image.open(path_datafrete), size=get_scaled_size(path_datafrete, 40))
+            self.lbl_logo_datafrete = ctk.CTkLabel(self.frame_header, text="", image=img_datafrete)
+            self.lbl_logo_datafrete.grid(row=0, column=2, sticky="e")
+        except Exception as e:
+            log(f"Erro ao carregar logo Datafrete na UI: {e}")
 
         # ── Frame de Opções ──
-        self.frame_opcoes = ctk.CTkFrame(self)
+        self.frame_opcoes = ctk.CTkFrame(self, border_width=2, border_color="#1B4F8A")
         self.frame_opcoes.grid(row=1, column=0, padx=40, pady=10, sticky="nsew")
         self.frame_opcoes.grid_columnconfigure(0, weight=1)
 
@@ -1078,7 +1117,20 @@ class DatafreteApp(ctk.CTk):
         self.label_log.grid(row=3, column=0, padx=40, pady=(5, 0), sticky="w")
         
         self.text_log = ctk.CTkTextbox(self, height=180, font=ctk.CTkFont(family="Consolas", size=12))
-        self.text_log.grid(row=4, column=0, padx=40, pady=(0, 25), sticky="nsew")
+        self.text_log.grid(row=4, column=0, padx=40, pady=(0, 10), sticky="nsew")
+
+        # ── Rodapé (Logo Agente AI) ──
+        self.frame_footer = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_footer.grid(row=5, column=0, sticky="ew", padx=40, pady=(0, 15))
+        self.frame_footer.grid_columnconfigure(0, weight=1)
+        
+        try:
+            path_app = pasta / "logo_app_nobg.jpg"
+            img_app = ctk.CTkImage(light_image=Image.open(path_app), dark_image=Image.open(path_app), size=get_scaled_size(path_app, 70))
+            self.lbl_logo_app = ctk.CTkLabel(self.frame_footer, text="", image=img_app)
+            self.lbl_logo_app.grid(row=0, column=0)
+        except Exception as e:
+            pass
 
     def append_log(self, msg):
         """Método seguro para atualizar a interface a partir de outra thread."""
