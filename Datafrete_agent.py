@@ -37,17 +37,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 load_dotenv()
 
 # ── Configurações gerais ───────────────────────────────────────────────────────
-# Credenciais NÃO ficam com valor padrão aqui — configure DATAFRETE_URL,
-# DATAFRETE_USER e DATAFRETE_PASS no arquivo .env (que não entra no git).
-BASE_URL     = os.getenv("DATAFRETE_URL")
-USERNAME     = os.getenv("DATAFRETE_USER")
-PASSWORD     = os.getenv("DATAFRETE_PASS")
-
-if not all([BASE_URL, USERNAME, PASSWORD]):
-    raise RuntimeError(
-        "Configure DATAFRETE_URL, DATAFRETE_USER e DATAFRETE_PASS no arquivo .env "
-        "antes de executar o agente."
-    )
+# A URL base do Datafrete pode vir do .env, mas o login agora é exigido na interface
+BASE_URL = os.getenv("DATAFRETE_URL") or "https://tms.datafrete.com.br"
 DOWNLOAD_DIR = Path("./exports")
 HEADLESS     = False
 
@@ -191,17 +182,17 @@ def verificar_cache(card: str) -> tuple[dict, bool]:
 # PLAYWRIGHT
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def step_login(page: Page):
+async def step_login(page: Page, email: str, senha: str):
     log("ETAPA 1 — Login")
     await page.goto(BASE_URL, wait_until="networkidle")
     for sel in ["input[type='email']", "input[name*='email']", "input[name*='usuario']"]:
         try:
-            await page.fill(sel, USERNAME, timeout=3000)
+            await page.fill(sel, email, timeout=3000)
             log(f"  → Usuário preenchido ({sel})")
             break
         except Exception:
             continue
-    await page.fill("input[type='password']", PASSWORD)
+    await page.fill("input[type='password']", senha)
     for sel in ["button:has-text('Continuar')", "button[type='submit']", "button:has-text('Entrar')"]:
         try:
             await page.click(sel, timeout=3000)
@@ -758,6 +749,10 @@ def _montar_aba_detalhes(wb, titulo_aba, titulo_banner, cor_banner,
         df_det = _ler_xlsx(info["arquivo"])
         if df_det is None or df_det.empty:
             continue
+            
+        # Manter apenas as colunas de A até L (as 12 primeiras colunas)
+        df_det = df_det.iloc[:, :12]
+
         if colunas is None:
             colunas = list(df_det.columns)
         else:
@@ -771,9 +766,7 @@ def _montar_aba_detalhes(wb, titulo_aba, titulo_banner, cor_banner,
     for col_i in range(1, n_cols + 1):
         ws.column_dimensions[get_column_letter(col_i)].width = 18
 
-    linha_cab = _banner(ws, titulo_banner, n_cols, cor_banner, subtitulo,
-                        logo_esq="logo_fotus_excel.png", logo_dir="logo_datafrete_excel.png",
-                        linha_unidade=unidade)
+    linha_cab = 1
 
     ws.row_dimensions[linha_cab].height = 18
     for col_i, col_name in enumerate(colunas, start=1):
@@ -839,6 +832,12 @@ def gerar_excel_detalhado(linhas, total_nf, total_ct, por_unidade, detalhes, cfg
     log(f"ETAPA 6 — Gerando Excel Detalhado ({cfg['label']})")
     cs, B_TAB, B_HDR = _make_styles()
 
+    # ── CRIANDO PASTA DIÁRIA ──
+    data_hoje_pasta = datetime.now().strftime("%Y-%m-%d")
+    pasta_importacao = DOWNLOAD_DIR / f"importacao_{data_hoje_pasta}"
+    pasta_importacao.mkdir(exist_ok=True)
+    log(f"  → Pasta de importação: {pasta_importacao.name}")
+
     wb        = openpyxl.Workbook()
     ws_resumo = wb.active
     ws_resumo.title = "Resumo Geral"
@@ -865,46 +864,79 @@ def gerar_excel_detalhado(linhas, total_nf, total_ct, por_unidade, detalhes, cfg
                            col_a_header="Transportador",
                            unidade=unidade)
 
+        def salvar_aba_individual(itens, tipo_aba, nome_aba_original, label_coluna, cor_banner, label_resumo):
+            # 1. Adiciona no arquivão
+            _montar_aba_detalhes(
+                wb,
+                titulo_aba     = nome_aba_original,
+                titulo_banner  = label_coluna,
+                cor_banner     = cor_banner,
+                subtitulo      = f"{label_resumo.upper()}  —  {data_hoje}",
+                itens_detalhes = itens,
+                cs=cs, B_TAB=B_TAB, B_HDR=B_HDR,
+                unidade=unidade,
+            )
+            
+            # 2. Cria arquivo isolado
+            wb_indiv = openpyxl.Workbook()
+            _montar_aba_detalhes(
+                wb_indiv,
+                titulo_aba     = "Detalhes",
+                titulo_banner  = label_coluna,
+                cor_banner     = cor_banner,
+                subtitulo      = f"{label_resumo.upper()}  —  {data_hoje}",
+                itens_detalhes = itens,
+                cs=cs, B_TAB=B_TAB, B_HDR=B_HDR,
+                unidade=unidade,
+            )
+            # Limpa aba vazia padrão do openpyxl
+            if "Sheet" in wb_indiv.sheetnames and len(wb_indiv.sheetnames) > 1:
+                wb_indiv.remove(wb_indiv["Sheet"])
+            
+            safe_unidade = re.sub(r'[\\/:*?"<>|]', '-', unidade)
+            nome_arquivo = f"{safe_unidade} - {tipo_aba}.xlsx"
+            caminho_indiv = pasta_importacao / sanitizar_nome(nome_arquivo).replace('_-_', ' - ')
+            wb_indiv.save(caminho_indiv)
+
         tipo_a  = "NF_sem_CT" if card == "arquivos" else "Pendente"
         itens_a = [i for i in detalhes.get(unidade, []) if i["tipo"] == tipo_a]
         if itens_a:
-            _montar_aba_detalhes(
-                wb,
-                titulo_aba     = nome_aba(unidade, cfg["titulo_aba_a"]),
-                titulo_banner  = cfg["col_a_label"],
-                cor_banner     = cfg["cor_banner_a"],
-                subtitulo      = f"{cfg['col_a_resumo'].upper()}  —  {data_hoje}",
-                itens_detalhes = itens_a,
-                cs=cs, B_TAB=B_TAB, B_HDR=B_HDR,
-                unidade=unidade,
+            salvar_aba_individual(
+                itens=itens_a,
+                tipo_aba=cfg["titulo_aba_a"],
+                nome_aba_original=nome_aba(unidade, cfg["titulo_aba_a"]),
+                label_coluna=cfg["col_a_label"],
+                cor_banner=cfg["cor_banner_a"],
+                label_resumo=cfg["col_a_resumo"]
             )
 
         tipo_b  = "CT_sem_NF" if card == "arquivos" else "Ocorrencia"
         itens_b = [i for i in detalhes.get(unidade, []) if i["tipo"] == tipo_b]
         if itens_b:
-            _montar_aba_detalhes(
-                wb,
-                titulo_aba     = nome_aba(unidade, cfg["titulo_aba_b"]),
-                titulo_banner  = cfg["col_b_label"],
-                cor_banner     = cfg["cor_banner_b"],
-                subtitulo      = f"{cfg['col_b_resumo'].upper()}  —  {data_hoje}",
-                itens_detalhes = itens_b,
-                cs=cs, B_TAB=B_TAB, B_HDR=B_HDR,
-                unidade=unidade,
+            salvar_aba_individual(
+                itens=itens_b,
+                tipo_aba=cfg["titulo_aba_b"],
+                nome_aba_original=nome_aba(unidade, cfg["titulo_aba_b"]),
+                label_coluna=cfg["col_b_label"],
+                cor_banner=cfg["cor_banner_b"],
+                label_resumo=cfg["col_b_resumo"]
             )
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
     saida     = DOWNLOAD_DIR / f"{cfg['prefixo']}_Detalhado_{timestamp}.xlsx"
     wb.save(saida)
-    log(f"  ✓ Excel salvo: {saida.name}")
-    return saida
+    
+    log(f"  ✓ Excel geral salvo: {saida.name}")
+    log(f"  ✓ Arquivos individuais de importação gerados na pasta: {pasta_importacao.name}")
+    
+    return pasta_importacao
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ORQUESTRADOR ASYNC
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def run_agent(card: str, modo: int, usar_cache: bool, detalhes_cache: dict):
+async def run_agent(card: str, modo: int, usar_cache: bool, detalhes_cache: dict, email: str = "", senha: str = ""):
     cfg = CARDS[card]
     log("=" * 55)
     log(f"  AGENTE DATAFRETE — {cfg['label']}")
@@ -928,7 +960,7 @@ async def run_agent(card: str, modo: int, usar_cache: bool, detalhes_cache: dict
             )
             page = await context.new_page()
             try:
-                await step_login(page)
+                await step_login(page, email, senha)
                 await step_abrir_modal(page, cfg)
                 await step_selecionar_visualizacao(page, cfg)
                 arquivo_bruto = await step_exportar_resumo(page, cfg)
@@ -975,7 +1007,7 @@ class DatafreteApp(ctk.CTk):
         super().__init__()
 
         self.title("FOTUS — Agente de Automação Datafrete")
-        self.geometry("700x650")
+        self.geometry("750x700")
         ctk.set_appearance_mode("System")
         
         # Conecta a função de log global com a nossa UI
@@ -983,49 +1015,70 @@ class DatafreteApp(ctk.CTk):
         UI_LOG_CALLBACK = self.append_log
         
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1) # Faz o log expandir
 
         # ── Título ──
-        self.label_titulo = ctk.CTkLabel(self, text="Agente de Relatórios Datafrete", font=ctk.CTkFont(size=24, weight="bold"))
-        self.label_titulo.grid(row=0, column=0, padx=20, pady=(20, 10))
+        self.label_titulo = ctk.CTkLabel(self, text="Agente de Relatórios Datafrete", font=ctk.CTkFont(size=26, weight="bold"))
+        self.label_titulo.grid(row=0, column=0, padx=20, pady=(25, 15))
 
         # ── Frame de Opções ──
         self.frame_opcoes = ctk.CTkFrame(self)
-        self.frame_opcoes.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        self.frame_opcoes.grid(row=1, column=0, padx=40, pady=10, sticky="nsew")
         self.frame_opcoes.grid_columnconfigure(0, weight=1)
 
         # 1. Relatório
-        self.label_card = ctk.CTkLabel(self.frame_opcoes, text="1. Selecione o Relatório:", font=ctk.CTkFont(weight="bold"))
-        self.label_card.grid(row=0, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.label_card = ctk.CTkLabel(self.frame_opcoes, text="1. Selecione o Relatório:", font=ctk.CTkFont(weight="bold", size=14))
+        self.label_card.grid(row=0, column=0, pady=(20, 5))
         
         self.var_card = ctk.StringVar(value="A")
-        self.rb_arquivos = ctk.CTkRadioButton(self.frame_opcoes, text="Pendências de Arquivos", variable=self.var_card, value="A")
-        self.rb_arquivos.grid(row=1, column=0, padx=30, pady=5, sticky="w")
-        self.rb_entrega = ctk.CTkRadioButton(self.frame_opcoes, text="Pendências de Entrega", variable=self.var_card, value="B")
-        self.rb_entrega.grid(row=2, column=0, padx=30, pady=5, sticky="w")
+        self.frame_radios = ctk.CTkFrame(self.frame_opcoes, fg_color="transparent")
+        self.frame_radios.grid(row=1, column=0, pady=5)
+        self.rb_arquivos = ctk.CTkRadioButton(self.frame_radios, text="Pendências de Arquivos", variable=self.var_card, value="A")
+        self.rb_arquivos.grid(row=0, column=0, padx=15)
+        self.rb_entrega = ctk.CTkRadioButton(self.frame_radios, text="Pendências de Entrega", variable=self.var_card, value="B")
+        self.rb_entrega.grid(row=0, column=1, padx=15)
 
         # 2. Modo
-        self.label_modo = ctk.CTkLabel(self.frame_opcoes, text="2. Selecione o Modo:", font=ctk.CTkFont(weight="bold"))
-        self.label_modo.grid(row=3, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.label_modo = ctk.CTkLabel(self.frame_opcoes, text="2. Selecione o Modo:", font=ctk.CTkFont(weight="bold", size=14))
+        self.label_modo.grid(row=2, column=0, pady=(15, 5))
         
-        self.menu_modo = ctk.CTkOptionMenu(self.frame_opcoes, values=["GERAL / MACRO", "DETALHADO / ANALÍTICO"])
-        self.menu_modo.grid(row=4, column=0, padx=30, pady=10, sticky="w")
+        self.menu_modo = ctk.CTkOptionMenu(self.frame_opcoes, values=["GERAL / MACRO", "DETALHADO / ANALÍTICO"], width=280)
+        self.menu_modo.grid(row=3, column=0, pady=5)
 
-        # 3. Cache
+        # 3. Credenciais de Acesso
+        self.label_credenciais = ctk.CTkLabel(self.frame_opcoes, text="3. Credenciais do Datafrete:", font=ctk.CTkFont(weight="bold", size=14))
+        self.label_credenciais.grid(row=4, column=0, pady=(15, 5))
+
+        self.frame_login = ctk.CTkFrame(self.frame_opcoes, fg_color="transparent")
+        self.frame_login.grid(row=5, column=0, pady=5)
+        
+        self.entry_email = ctk.CTkEntry(self.frame_login, placeholder_text="E-mail", width=250)
+        self.entry_email.grid(row=0, column=0, padx=10)
+        
+        self.entry_senha = ctk.CTkEntry(self.frame_login, placeholder_text="Senha", show="*", width=200)
+        self.entry_senha.grid(row=0, column=1, padx=10)
+
+        # 4. Cache
         self.var_cache = ctk.IntVar(value=0)
-        self.cb_cache = ctk.CTkCheckBox(self.frame_opcoes, text="Usar arquivos em cache (se disponíveis)", variable=self.var_cache)
-        self.cb_cache.grid(row=5, column=0, padx=30, pady=(5, 15), sticky="w")
+        self.cb_cache = ctk.CTkCheckBox(
+            self.frame_opcoes, 
+            text="REPROCESSAR planilhas já extraídas (Não acessar o Datafrete)", 
+            variable=self.var_cache,
+            font=ctk.CTkFont(weight="bold")
+        )
+        self.cb_cache.grid(row=6, column=0, pady=(20, 25))
 
         # ── Botão Iniciar ──
         self.btn_run = ctk.CTkButton(self, text="INICIAR AUTOMAÇÃO", command=self.start_automation_thread, 
-                                     fg_color="#1B4F8A", hover_color="#153e6d", font=ctk.CTkFont(weight="bold", size=14), height=40)
-        self.btn_run.grid(row=2, column=0, padx=20, pady=15)
+                                     fg_color="#1B4F8A", hover_color="#153e6d", font=ctk.CTkFont(weight="bold", size=15), height=45, width=220)
+        self.btn_run.grid(row=2, column=0, pady=20)
 
         # ── Área de Logs ──
         self.label_log = ctk.CTkLabel(self, text="Log de Execução:", font=ctk.CTkFont(weight="bold"))
-        self.label_log.grid(row=3, column=0, padx=20, pady=(5, 0), sticky="w")
+        self.label_log.grid(row=3, column=0, padx=40, pady=(5, 0), sticky="w")
         
-        self.text_log = ctk.CTkTextbox(self, height=200, font=ctk.CTkFont(family="Consolas", size=12))
-        self.text_log.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        self.text_log = ctk.CTkTextbox(self, height=180, font=ctk.CTkFont(family="Consolas", size=12))
+        self.text_log.grid(row=4, column=0, padx=40, pady=(0, 25), sticky="nsew")
 
     def append_log(self, msg):
         """Método seguro para atualizar a interface a partir de outra thread."""
@@ -1044,6 +1097,14 @@ class DatafreteApp(ctk.CTk):
         escolha_modo = 1 if self.menu_modo.get() == "GERAL / MACRO" else 2
         usar_cache_ui = bool(self.var_cache.get())
         
+        email = self.entry_email.get().strip()
+        senha = self.entry_senha.get().strip()
+        
+        if not usar_cache_ui and (not email or not senha):
+            self.append_log("⚠ ERRO: Preencha o E-mail e a Senha para rodar a automação (ou marque o cache).")
+            self.btn_run.configure(state="normal")
+            return
+            
         detalhes_cache = {}
         usar_cache_final = False
 
@@ -1054,16 +1115,20 @@ class DatafreteApp(ctk.CTk):
                 usar_cache_final = True
             else:
                 log("⚠ Nenhum cache válido encontrado. Extração no Datafrete será iniciada.")
+                if not email or not senha:
+                    self.append_log("⚠ ERRO: Preencha E-mail e Senha, pois não há cache disponível para pular o login.")
+                    self.btn_run.configure(state="normal")
+                    return
         
-        thread = threading.Thread(target=self.run_async_wrapper, args=(escolha_card, escolha_modo, usar_cache_final, detalhes_cache))
+        thread = threading.Thread(target=self.run_async_wrapper, args=(escolha_card, escolha_modo, usar_cache_final, detalhes_cache, email, senha))
         thread.start()
 
-    def run_async_wrapper(self, card, modo, usar_cache, detalhes_cache):
+    def run_async_wrapper(self, card, modo, usar_cache, detalhes_cache, email, senha):
         """Wrapper para rodar o loop de eventos async dentro da thread secundária"""
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_agent(card, modo, usar_cache, detalhes_cache))
+            loop.run_until_complete(run_agent(card, modo, usar_cache, detalhes_cache, email, senha))
         except Exception as e:
             log(f"ERRO CRÍTICO NA EXECUÇÃO: {e}")
         finally:
