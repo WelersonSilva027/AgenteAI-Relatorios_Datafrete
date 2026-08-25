@@ -6,3 +6,5 @@ python-calamine==0.8.2
 lxml==6.1.1
 customtkinter==6.0.0
 pillow==12.3.0
+html5lib>=1.1
+beautifulsoup4>=4.12.0

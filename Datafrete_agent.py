@@ -14,6 +14,7 @@ Dependências:
 
 import os
 import re
+import json
 import asyncio
 import zipfile
 import threading
@@ -41,6 +42,42 @@ load_dotenv()
 BASE_URL = os.getenv("DATAFRETE_URL") or "https://tms.datafrete.com.br"
 DOWNLOAD_DIR = Path("./exports")
 HEADLESS     = False
+DB_FILE      = Path("./.db_operacoes.json")
+
+def salvar_operacao(tipo, modo, qtd_transp, qtd_arquivos, tempo_segundos):
+    try:
+        dados = []
+        if DB_FILE.exists():
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        
+        operacao = {
+            "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tipo": tipo,
+            "modo": modo,
+            "transportadores": qtd_transp,
+            "arquivos": qtd_arquivos,
+            "tempo_segundos": round(tempo_segundos, 1)
+        }
+        dados.append(operacao)
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(dados, f, indent=4)
+    except Exception as e:
+        log(f"Erro ao salvar operação no DB: {e}")
+
+def carregar_estatisticas():
+    try:
+        if not DB_FILE.exists():
+            return 0, 0, 0, 0
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        tot_arquivos = sum(d.get("arquivos", 0) for d in dados)
+        tot_transp = sum(d.get("transportadores", 0) for d in dados)
+        # Assumindo 5 min poupados por arquivo gerado
+        tempo_poupado_seg = sum((d.get("arquivos", 0) * 300) - d.get("tempo_segundos", 0) for d in dados)
+        return len(dados), tot_arquivos, tot_transp, max(0, tempo_poupado_seg)
+    except:
+        return 0, 0, 0, 0
 
 # ── Sistema de Log para a UI ───────────────────────────────────────────────────
 UI_LOG_CALLBACK = None
@@ -709,8 +746,8 @@ def _montar_aba_resumo(wb, ws, cfg, titulo, dados, tot_a, tot_b, col_a_header="U
         n_colunas=3,
         cor_fundo=AZUL_FOTUS,
         subtitulo=f"RELATÓRIO MATUTINO  —  {datetime.now().strftime('%d/%m/%Y')}",
-        logo_esq="logo_fotus_excel.png",
-        logo_dir="Logo_datafrete_App.png",
+        logo_esq="logo_fotus_branca_excel.png",
+        logo_dir="logo_datafrete_excel.png",
         linha_unidade=unidade,
     )
 
@@ -996,7 +1033,16 @@ async def run_agent(card: str, modo: int, usar_cache: bool, detalhes_cache: dict
     log("=" * 55)
 
     abrir_arquivo(relatorio)
-
+    
+    transportadores_unicos = set()
+    for uni, transps in por_unidade.items():
+        for t in transps.keys():
+            transportadores_unicos.add(t)
+            
+    qtd_transp = len(transportadores_unicos)
+    qtd_arquivos = 1 if modo == 1 else len(list(relatorio.glob("*.xlsx")))
+    
+    return qtd_transp, qtd_arquivos
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INTERFACE GRÁFICA (GUI)
@@ -1016,7 +1062,7 @@ class DatafreteApp(ctk.CTk):
         UI_LOG_CALLBACK = self.append_log
         
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1) # Faz o log expandir
+        self.grid_rowconfigure(1, weight=1) # Faz o log expandir
 
         from PIL import Image
         pasta = Path(__file__).parent
@@ -1060,9 +1106,18 @@ class DatafreteApp(ctk.CTk):
         except Exception as e:
             log(f"Erro ao carregar logo Datafrete na UI: {e}")
 
+        # ── Tabs ──
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=1, column=0, padx=20, pady=5, sticky="nsew")
+        self.tab_auto = self.tabview.add("Automação")
+        self.tab_dash = self.tabview.add("Operações")
+        self.tab_auto.grid_columnconfigure(0, weight=1)
+        self.tab_auto.grid_rowconfigure(3, weight=1)
+        self.tab_dash.grid_columnconfigure(0, weight=1)
+
         # ── Frame de Opções ──
-        self.frame_opcoes = ctk.CTkFrame(self, border_width=2, border_color="#1B4F8A")
-        self.frame_opcoes.grid(row=1, column=0, padx=40, pady=10, sticky="nsew")
+        self.frame_opcoes = ctk.CTkFrame(self.tab_auto, border_width=2, border_color="#1B4F8A")
+        self.frame_opcoes.grid(row=0, column=0, padx=40, pady=10, sticky="nsew")
         self.frame_opcoes.grid_columnconfigure(0, weight=1)
 
         # 1. Relatório
@@ -1094,6 +1149,14 @@ class DatafreteApp(ctk.CTk):
         self.entry_email = ctk.CTkEntry(self.frame_login, placeholder_text="E-mail", width=250)
         self.entry_email.grid(row=0, column=0, padx=10)
         
+        try:
+            with open(pasta / ".last_email", "r") as f:
+                last_email = f.read().strip()
+                if last_email:
+                    self.entry_email.insert(0, last_email)
+        except Exception:
+            pass
+        
         self.entry_senha = ctk.CTkEntry(self.frame_login, placeholder_text="Senha", show="*", width=200)
         self.entry_senha.grid(row=0, column=1, padx=10)
 
@@ -1108,16 +1171,38 @@ class DatafreteApp(ctk.CTk):
         self.cb_cache.grid(row=6, column=0, pady=(20, 25))
 
         # ── Botão Iniciar ──
-        self.btn_run = ctk.CTkButton(self, text="INICIAR AUTOMAÇÃO", command=self.start_automation_thread, 
+        self.btn_run = ctk.CTkButton(self.tab_auto, text="INICIAR AUTOMAÇÃO", command=self.start_automation_thread, 
                                      fg_color="#1B4F8A", hover_color="#153e6d", font=ctk.CTkFont(weight="bold", size=15), height=45, width=220)
-        self.btn_run.grid(row=2, column=0, pady=20)
+        self.btn_run.grid(row=1, column=0, pady=20)
 
         # ── Área de Logs ──
-        self.label_log = ctk.CTkLabel(self, text="Log de Execução:", font=ctk.CTkFont(weight="bold"))
-        self.label_log.grid(row=3, column=0, padx=40, pady=(5, 0), sticky="w")
+        self.label_log = ctk.CTkLabel(self.tab_auto, text="Log de Execução:", font=ctk.CTkFont(weight="bold"))
+        self.label_log.grid(row=2, column=0, padx=40, pady=(5, 0), sticky="w")
         
-        self.text_log = ctk.CTkTextbox(self, height=180, font=ctk.CTkFont(family="Consolas", size=12))
-        self.text_log.grid(row=4, column=0, padx=40, pady=(0, 10), sticky="nsew")
+        self.text_log = ctk.CTkTextbox(self.tab_auto, height=180, font=ctk.CTkFont(family="Consolas", size=12))
+        self.text_log.grid(row=3, column=0, padx=40, pady=(0, 10), sticky="nsew")
+
+        # ── Dashboard (Aba Operações) ──
+        self.lbl_dash_title = ctk.CTkLabel(self.tab_dash, text="Resumo de Operações e Economia", font=ctk.CTkFont(size=20, weight="bold"))
+        self.lbl_dash_title.grid(row=0, column=0, pady=20)
+
+        self.frame_metrics = ctk.CTkFrame(self.tab_dash)
+        self.frame_metrics.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+        self.frame_metrics.grid_columnconfigure(0, weight=1)
+        self.frame_metrics.grid_columnconfigure(1, weight=1)
+        self.frame_metrics.grid_columnconfigure(2, weight=1)
+
+        self.lbl_tot_op = ctk.CTkLabel(self.frame_metrics, text="Operações\n0", font=ctk.CTkFont(size=18, weight="bold"))
+        self.lbl_tot_op.grid(row=0, column=0, pady=20)
+        self.lbl_tot_arq = ctk.CTkLabel(self.frame_metrics, text="Arquivos / E-mails\n0", font=ctk.CTkFont(size=18, weight="bold"))
+        self.lbl_tot_arq.grid(row=0, column=1, pady=20)
+        self.lbl_tot_transp = ctk.CTkLabel(self.frame_metrics, text="Transportadores\n0", font=ctk.CTkFont(size=18, weight="bold"))
+        self.lbl_tot_transp.grid(row=0, column=2, pady=20)
+
+        self.lbl_tempo = ctk.CTkLabel(self.tab_dash, text="Tempo Poupado: 0h 0m", font=ctk.CTkFont(size=22, weight="bold"), text_color="#1F6B3A")
+        self.lbl_tempo.grid(row=2, column=0, pady=30)
+
+        self.atualizar_dashboard()
 
         # ── Rodapé (Logo Agente AI) ──
         self.frame_footer = ctk.CTkFrame(self, fg_color="transparent")
@@ -1152,6 +1237,13 @@ class DatafreteApp(ctk.CTk):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
         
+        if email:
+            try:
+                with open(Path(__file__).parent / ".last_email", "w") as f:
+                    f.write(email)
+            except Exception:
+                pass
+        
         if not usar_cache_ui and (not email or not senha):
             self.append_log("⚠ ERRO: Preencha o E-mail e a Senha para rodar a automação (ou marque o cache).")
             self.btn_run.configure(state="normal")
@@ -1178,15 +1270,28 @@ class DatafreteApp(ctk.CTk):
     def run_async_wrapper(self, card, modo, usar_cache, detalhes_cache, email, senha):
         """Wrapper para rodar o loop de eventos async dentro da thread secundária"""
         try:
+            import time
+            inicio = time.time()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_agent(card, modo, usar_cache, detalhes_cache, email, senha))
+            qtd_transp, qtd_arquivos = loop.run_until_complete(run_agent(card, modo, usar_cache, detalhes_cache, email, senha))
+            tempo_seg = time.time() - inicio
+            salvar_operacao(card, modo, qtd_transp, qtd_arquivos, tempo_seg)
         except Exception as e:
             log(f"ERRO CRÍTICO NA EXECUÇÃO: {e}")
         finally:
             loop.close()
             # Reativa o botão na thread principal
             self.after(0, lambda: self.btn_run.configure(state="normal"))
+            self.after(0, self.atualizar_dashboard)
+    def atualizar_dashboard(self):
+        tot_op, tot_arq, tot_transp, tempo_seg = carregar_estatisticas()
+        self.lbl_tot_op.configure(text=f"Operações\n{tot_op}")
+        self.lbl_tot_arq.configure(text=f"Arquivos / E-mails\n{tot_arq}")
+        self.lbl_tot_transp.configure(text=f"Transportadores\n{tot_transp}")
+        horas = int(tempo_seg // 3600)
+        minutos = int((tempo_seg % 3600) // 60)
+        self.lbl_tempo.configure(text=f"Tempo Poupado Estimado: {horas}h {minutos}m")
 
 
 if __name__ == "__main__":

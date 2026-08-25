@@ -5,3 +5,5 @@ __pycache__/
 exports/
 erro_timeout.png
 erro_geral.png
+.last_email
+.db_operacoes.json
